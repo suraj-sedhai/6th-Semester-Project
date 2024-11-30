@@ -263,7 +263,7 @@ if(isset($_GET['id'])){
 					if(resp.status == 'success'){
 						location.replace(_base_url_+"admin/?page=sales/view_sale&id="+resp.id);
 					}else if(resp.status == 'failed' && !!resp.msg){
-                        var el = $('<div>')
+                        var el = $('<pre>')
                             el.addClass("alert alert-danger err-msg").text(resp.msg)
                             _this.prepend(el)
                             el.show('slow')

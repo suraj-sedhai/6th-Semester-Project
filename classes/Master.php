@@ -1,5 +1,6 @@
 <?php
 require_once('../config.php');
+if(!defined('FLAG_DEBUG')){ require_once("../initialize.php"); }
 Class Master extends DBConnection {
 	private $settings;
 	public function __construct(){
@@ -62,6 +63,19 @@ Class Master extends DBConnection {
 	}
 	function delete_supplier(){
 		extract($_POST);
+
+		if (!SETTING__ALLOW_NGE_STOCK) {
+			$validation = $this->conn->query("SELECT COUNT(*) count FROM `item_list` WHERE `supplier_id` = '{$id}'");
+			if($validation){
+				$row = $validation->fetch_assoc();
+				if ($row['count'] > 0) {
+					$resp["status"] = "failed";
+					$resp["msg"] = "Stock form this supplier is already tracked. So, this supplier cannot be deleted.";
+					return json_encode($resp);
+				}
+			} 
+		}
+
 		$del = $this->conn->query("DELETE FROM `supplier_list` where id = '{$id}'");
 		if($del){
 			$resp['status'] = 'success';
@@ -113,6 +127,19 @@ Class Master extends DBConnection {
 	}
 	function delete_item(){
 		extract($_POST);
+
+		if (!SETTING__ALLOW_NGE_STOCK) {
+			$validation = $this->conn->query("SELECT is_transaction_done({$id}) AS count;");
+			if($validation){
+				$row = $validation->fetch_assoc();
+				if ($row['count'] > 0) {
+					$resp["status"] = "failed";
+					$resp["msg"] = "Transaction on this item is already done. So, this item cannot be deleted.";
+					return json_encode($resp);
+				}
+			}
+		}
+
 		$del = $this->conn->query("DELETE FROM `item_list` where id = '{$id}'");
 		if($del){
 			$resp['status'] = 'success';
@@ -194,6 +221,60 @@ Class Master extends DBConnection {
 	}
 	function delete_po(){
 		extract($_POST);
+		
+		$debugInfo = "Debug Info: ";
+		$debugInfo .= "\n🔸 POST Request: ".print_r($_POST, true);
+
+		if (!SETTING__ALLOW_NGE_STOCK) {
+			$debugInfo .= "\n🔸 Negative Stock is not allowed.";
+			$noStock = "";
+
+			$validation1 = $this->conn->query("SELECT item_id, quantity from po_items left join purchase_order_list po on po_items.po_id = po.id where po_id = {$id} and po.status <> 0");
+			if ($validation1) {
+				while($row = $validation1->fetch_assoc()) {
+					$validation2 = $this->conn->query("SELECT 
+							item_list.name, 
+							item_list.id,
+							CASE 
+								WHEN SUM(stock_list.quantity * (CASE WHEN stock_list.type = 1 THEN 1 ELSE -1 END)) >= {$row['quantity']} THEN COUNT(stock_list.id)
+								ELSE 0
+							END AS count
+						FROM 
+							item_list
+						LEFT JOIN 
+							stock_list 
+						ON 
+							stock_list.item_id = item_list.id
+						WHERE
+							stock_list.id = {$row['item_id']}
+						GROUP BY 
+							item_list.id, item_list.name
+						");
+					
+					if($validation2){
+						$row = $validation2->fetch_assoc();
+						if ($row['count'] <= 0) {
+							$noStock .= ($noStock == '') ? $row['name'] : ', '. $row['name'];
+						}
+					}
+				}
+			}
+			if ($noStock != '') {
+				$resp["status"] = "failed";
+				$resp["msg"] = "Deleting PO with following stock will cause them to go negative: \n$noStock.";
+				return json_encode($resp);
+			}		
+		}
+
+		if (FLAG_DEBUG) {
+			$resp["status"] = "failed";
+			$resp["msg"] = $debugInfo;
+
+			return json_encode($resp);
+		}
+
+
+
 		$bo = $this->conn->query("SELECT * FROM back_order_list where po_id = '{$id}'");
 		$del = $this->conn->query("DELETE FROM `purchase_order_list` where id = '{$id}'");
 		if($del){
@@ -220,6 +301,7 @@ Class Master extends DBConnection {
 
 	}
 	function save_receiving(){
+		
 		if(empty($_POST['id'])){
 			$prefix = "BO";
 			$code = sprintf("%'.04d",1);
@@ -233,7 +315,7 @@ Class Master extends DBConnection {
 			}
 			$_POST['bo_code'] = $prefix."-".$code;
 		}else{
-			$get = $this->conn->query("SELECT * FROM back_order_list where receiving_id = '{$_POST['id']}' ");
+			$get = $this->conn->query("SELECT * FROM back_order_list where receiving_id = '{$_POST['id']}'");
 			if($get->num_rows > 0){
 				$res = $get->fetch_array();
 				$bo_id = $res['id'];
@@ -251,7 +333,6 @@ Class Master extends DBConnection {
 					}
 				}
 				$_POST['bo_code'] = $prefix."-".$code;
-
 			}
 		}
 		extract($_POST);
@@ -365,6 +446,67 @@ Class Master extends DBConnection {
 	}
 	function delete_receiving(){
 		extract($_POST);
+
+		$debugInfo = "Debug Info: ";
+
+		if (!SETTING__ALLOW_NGE_STOCK) {
+			$debugInfo .= "\n🔸 Negative Stock is not allowed.";
+			$noStock = "";
+
+			$validation1 = $this->conn->query("SELECT stock_ids from receiving_list where id = {$id}");
+			if ($validation1) {
+				while($row = $validation1->fetch_assoc()) {
+					$validation2 = $this->conn->query("SELECT item_id, quantity from stock_list where id in ({$row['stock_ids']})");
+					if ($validation2) {
+						while($row2 = $validation2->fetch_assoc()) {
+							$debugInfo .= "\n🔸 row2: ".print_r($row2, true);
+							$validation3 = $this->conn->query("SELECT 
+									item_list.name, 
+									item_list.id,
+									CASE 
+										WHEN SUM(stock_list.quantity * (CASE WHEN stock_list.type = 1 THEN 1 ELSE -1 END)) >= {$row2['quantity']} THEN COUNT(stock_list.id)
+										ELSE 0
+									END AS count
+								FROM 
+									item_list
+								LEFT JOIN 
+									stock_list 
+								ON 
+									stock_list.item_id = item_list.id
+								WHERE
+									item_list.id = {$row2['item_id']}
+								GROUP BY 
+									item_list.id, item_list.name
+								");
+							
+							if($validation3){
+								$row3 = $validation3->fetch_assoc();
+								$debugInfo .= "\n🔸 row3: ".print_r($row3, true);
+
+								if ($row3['count'] <= 0) {
+									$noStock .= ($noStock == '') ? $row3['name'] : ', '. $row3['name'];
+								}
+							}
+
+						}
+					}
+				}
+			}
+			if ($noStock != '') {
+				$resp["status"] = "failed";
+				$resp["msg"] = "Deleting received items with following stock will cause them to go negative: \n$noStock.";
+				return json_encode($resp);
+			}		
+		}
+
+		if (FLAG_DEBUG) {
+			$resp["status"] = "failed";
+			$resp["msg"] = $debugInfo;
+
+			return json_encode($resp);
+		}
+
+
 		$qry = $this->conn->query("SELECT * from  receiving_list where id='{$id}' ");
 		if($qry->num_rows > 0){
 			$res = $qry->fetch_array();
@@ -391,6 +533,58 @@ Class Master extends DBConnection {
 	}
 	function delete_bo(){
 		extract($_POST);
+
+		$debugInfo = "Debug Info: ";
+		$debugInfo .= "\n🔸 POST Request: ".print_r($_POST, true);
+
+		if (!SETTING__ALLOW_NGE_STOCK) {
+			$debugInfo .= "\n🔸 Negative Stock is not allowed.";
+			$noStock = "";
+
+			$validation1 = $this->conn->query("SELECT item_id, quantity from bo_items left join back_order_list bo on bo_items.bo_id = bo.id where bo_id = {$id} and bo.status <> 0");
+			if ($validation1) {
+				while($row = $validation1->fetch_assoc()) {
+					$validation2 = $this->conn->query("SELECT 
+							item_list.name, 
+							item_list.id,
+							CASE 
+								WHEN SUM(stock_list.quantity * (CASE WHEN stock_list.type = 1 THEN 1 ELSE -1 END)) >= {$row['quantity']} THEN COUNT(stock_list.id)
+								ELSE 0
+							END AS count
+						FROM 
+							item_list
+						LEFT JOIN 
+							stock_list 
+						ON 
+							stock_list.item_id = item_list.id
+						WHERE
+							stock_list.id = {$row['item_id']}
+						GROUP BY 
+							item_list.id, item_list.name
+						");
+					
+					if($validation2){
+						$row = $validation2->fetch_assoc();
+						if ($row['count'] <= 0) {
+							$noStock .= ($noStock == '') ? $row['name'] : ', '. $row['name'];
+						}
+					}
+				}
+			}
+			if ($noStock != '') {
+				$resp["status"] = "failed";
+				$resp["msg"] = "Deleting BO with following stock will cause them to go negative: \n$noStock.";
+				return json_encode($resp);
+			}		
+		}
+
+		if (FLAG_DEBUG) {
+			$resp["status"] = "failed";
+			$resp["msg"] = $debugInfo;
+
+			return json_encode($resp);
+		}
+
 		$bo =$this->conn->query("SELECT * FROM `back_order_list` where id = '{$id}'");
 		if($bo->num_rows >0)
 		$bo_res = $bo->fetch_array();
@@ -414,13 +608,14 @@ Class Master extends DBConnection {
 					$this->conn->query("UPDATE `purchase_order_list` set status = 0 where id = '{$bo_res['po_id']}' ");
 				}
 			}
-		}else{
+		} else {
 			$resp['status'] = 'failed';
 			$resp['error'] = $this->conn->error;
 		}
 		return json_encode($resp);
 	}
 	function save_return(){
+		$debugInfo = "Debug Info:";
 		if(empty($_POST['id'])){
 			$prefix = "R";
 			$code = sprintf("%'.04d",1);
@@ -435,6 +630,55 @@ Class Master extends DBConnection {
 			$_POST['return_code'] = $prefix."-".$code;
 		}
 		extract($_POST);
+		$debugInfo .= "\n🔸 POST Request: ".print_r($_POST, true);
+		
+		if (!SETTING__ALLOW_NGE_STOCK) {
+			$debugInfo .= "\n🔸 Negative Stock is not allowed.";
+			$debugInfo .= "\n🔸 Number of Entries: ".count($_POST['item_id']);
+			$noStock = "";
+			for ($i = 0; $i < count($_POST['item_id']); $i++) {
+				$validation = $this->conn->query("SELECT 
+						item_list.name, 
+						item_list.id,
+						CASE 
+							WHEN SUM(stock_list.quantity * (CASE WHEN stock_list.type = 1 THEN 1 ELSE -1 END)) >= {$_POST['qty'][$i]} THEN COUNT(stock_list.id)
+							ELSE 0
+						END AS count
+					FROM 
+						item_list
+					LEFT JOIN 
+						stock_list 
+					ON 
+						stock_list.item_id = item_list.id
+					WHERE
+						item_list.id = {$_POST['item_id'][$i]}
+					GROUP BY 
+						item_list.id, item_list.name
+					");
+				
+				if($validation){
+					$row = $validation->fetch_assoc();
+					$debugInfo .= '🔸 Stock Status: Name :'. $row['name'] .' || Id: '.$row['id'] .' || Count: '.$row['count'] . ' || request Qty: '. $_POST['qty'][$i];
+					if ($row['count'] <= 0) {
+						$noStock .= ($noStock == '') ? $row['name'] : ', '. $row['name'];
+					}
+				} 
+				
+			}
+			if ($noStock != '') {
+				$resp["status"] = "failed";
+				$resp["msg"] = "You don't have enough $noStock to return.";
+				return json_encode($resp);
+			}		
+		}
+		
+		if (FLAG_DEBUG) {
+			$resp["status"] = "failed";
+			$resp["msg"] = $debugInfo;
+
+			return json_encode($resp);
+		}
+
 		$data = "";
 		foreach($_POST as $k =>$v){
 			if(!in_array($k,array('id')) && !is_array($_POST[$k])){
@@ -510,6 +754,7 @@ Class Master extends DBConnection {
 
 	}
 	function save_sale(){
+		$debugInfo = "Debug Info: ";
 		if(empty($_POST['id'])){
 			$prefix = "SALE";
 			$code = sprintf("%'.04d",1);
@@ -523,7 +768,58 @@ Class Master extends DBConnection {
 			}
 			$_POST['sales_code'] = $prefix."-".$code;
 		}
+
 		extract($_POST);
+		$debugInfo .= "\n🔸 POST Request: ".print_r($_POST, true);
+
+		if (!SETTING__ALLOW_NGE_STOCK) {
+			$debugInfo .= "\n🔸 Negative Stock is not allowed.";
+			$debugInfo .= "\n🔸 Number of Entries: ".count($_POST['item_id']);
+			$noStock = "";
+			for ($i = 0; $i < count($_POST['item_id']); $i++) {
+				$validation = $this->conn->query("SELECT 
+						item_list.name, 
+						item_list.id,
+						CASE 
+							WHEN SUM(stock_list.quantity * (CASE WHEN stock_list.type = 1 THEN 1 ELSE -1 END)) >= {$_POST['qty'][$i]} THEN COUNT(stock_list.id)
+							ELSE 0
+						END AS count
+					FROM 
+						item_list
+					LEFT JOIN 
+						stock_list 
+					ON 
+						stock_list.item_id = item_list.id
+					WHERE
+						item_list.id = {$_POST['item_id'][$i]}
+					GROUP BY 
+						item_list.id, item_list.name
+					");
+				
+				if($validation){
+					$row = $validation->fetch_assoc();
+					$debugInfo .= '🔸 Stock Status: Name :'. $row['name'] .' || Id: '.$row['id'] .' || Count: '.$row['count'] . ' || request Qty: '. $_POST['qty'][$i];
+					if ($row['count'] <= 0) {
+						$noStock .= ($noStock == '') ? $row['name'] : ', '. $row['name'];
+					}
+				} 
+				
+			}
+			if ($noStock != '') {
+				$resp["status"] = "failed";
+				$resp["msg"] = "You don't have enough $noStock to return.";
+				return json_encode($resp);
+			}		
+		}
+
+		if (FLAG_DEBUG) {
+			$resp["status"] = "failed";
+			$resp["msg"] = $debugInfo;
+
+			return json_encode($resp);
+		}
+
+
 		$data = "";
 		foreach($_POST as $k =>$v){
 			if(!in_array($k,array('id')) && !is_array($_POST[$k])){
